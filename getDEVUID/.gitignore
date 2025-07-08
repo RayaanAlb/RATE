@@ -1,0 +1,39 @@
+# Generated QR Code files
+*.png
+
+# Database files
+*.db
+
+# Excel exports
+*.xlsx
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+env/
+.env
+
+# System files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test files
+test_*.py
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.temp 
