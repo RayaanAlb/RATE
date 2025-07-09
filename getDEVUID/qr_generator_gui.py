@@ -1,267 +1,527 @@
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+import flet as ft
 import qrcode
 import sqlite3
 from datetime import datetime
-from PIL import Image, ImageTk
+from PIL import Image
 import os
+import json
+import random
+import base64
+import io
+import subprocess
+import tempfile
+from openpyxl import Workbook
+from openpyxl.drawing.image import Image as OpenpyxlImage
+from openpyxl.styles import Font, Alignment, PatternFill
 
 class QRGeneratorApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("QR Code Generator")
-        self.root.geometry("800x600")
-        self.root.configure(bg='#f0f0f0')
+    def __init__(self, page: ft.Page):
+        self.page = page
+        self.page.title = "QR Code Generator"
         
-        # Initialize database
+        # Make window resizable and responsive with better minimum sizes
+        self.page.window_width = 1200
+        self.page.window_height = 850
+        self.page.window_min_width = 800
+        self.page.window_min_height = 600
+        self.page.window_resizable = True
+        self.page.window_maximizable = True
+        
+        self.page.theme_mode = ft.ThemeMode.LIGHT
+        self.page.padding = ft.padding.all(10)
+        self.page.scroll = ft.ScrollMode.AUTO
+        
+        # Initialize database in main thread
         self.init_database()
         
-        # Create GUI elements
-        self.create_widgets()
+        # Create UI controls
+        self.create_controls()
         
         # Load existing records
         self.load_records()
+        
+        # Build the page
+        self.build()
     
     def init_database(self):
         """Initialize SQLite database"""
-        self.conn = sqlite3.connect('qr_codes.db')
+        self.conn = sqlite3.connect('qr_codes.db', check_same_thread=False)
         self.cursor = self.conn.cursor()
         
-        # Check if we need to migrate from auto-increment to manual ID management
-        self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='qr_records'")
-        table_exists = self.cursor.fetchone()
+        # Create table if it doesn't exist
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS qr_records (
+                id INTEGER PRIMARY KEY,
+                serial_number TEXT NOT NULL,
+                verification_code TEXT NOT NULL,
+                dev_uid TEXT NOT NULL,
+                device_name TEXT,
+                qr_filename TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         
-        if table_exists:
-            # Check if table has auto-increment
-            self.cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='qr_records'")
-            table_sql = self.cursor.fetchone()[0]
-            
-            if 'AUTOINCREMENT' in table_sql:
-                print("🔄 Migrating database to remove auto-increment...")
-                self.migrate_database()
-        else:
-            # Create new table without auto-increment
-            self.cursor.execute('''
-                CREATE TABLE qr_records (
-                    id INTEGER PRIMARY KEY,
-                    serial_number TEXT NOT NULL,
-                    verification_code TEXT NOT NULL,
-                    dev_uid TEXT NOT NULL,
-                    qr_filename TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            self.conn.commit()
-    
-    def migrate_database(self):
-        """Migrate existing database to remove auto-increment"""
+        # Add device_name column if it doesn't exist (for existing databases)
         try:
-            # Create backup table
-            self.cursor.execute('''
-                CREATE TABLE qr_records_backup AS 
-                SELECT * FROM qr_records ORDER BY created_at ASC
-            ''')
-            
-            # Drop original table
-            self.cursor.execute('DROP TABLE qr_records')
-            
-            # Create new table without auto-increment
-            self.cursor.execute('''
-                CREATE TABLE qr_records (
-                    id INTEGER PRIMARY KEY,
-                    serial_number TEXT NOT NULL,
-                    verification_code TEXT NOT NULL,
-                    dev_uid TEXT NOT NULL,
-                    qr_filename TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Get data from backup and reassign sequential IDs
-            self.cursor.execute('SELECT serial_number, verification_code, dev_uid, qr_filename, created_at FROM qr_records_backup ORDER BY created_at ASC')
-            records = self.cursor.fetchall()
-            
-            # Insert records with sequential IDs starting from 1
-            for i, record in enumerate(records, 1):
-                self.cursor.execute('''
-                    INSERT INTO qr_records (id, serial_number, verification_code, dev_uid, qr_filename, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (i, record[0], record[1], record[2], record[3], record[4]))
-            
-            # Drop backup table
-            self.cursor.execute('DROP TABLE qr_records_backup')
-            
+            self.cursor.execute("ALTER TABLE qr_records ADD COLUMN device_name TEXT")
             self.conn.commit()
-            print("✅ Database migration completed - IDs are now sequential")
-            
-        except Exception as e:
-            print(f"❌ Migration error: {str(e)}")
-            # Restore from backup if migration fails
-            try:
-                self.cursor.execute('DROP TABLE IF EXISTS qr_records')
-                self.cursor.execute('ALTER TABLE qr_records_backup RENAME TO qr_records')
-                self.conn.commit()
-                print("🔄 Restored original table")
-            except:
-                pass
+            print("✅ Added device_name column to existing database")
+        except sqlite3.OperationalError:
+            # Column already exists, ignore
+            pass
+        
+        self.conn.commit()
     
-    def create_widgets(self):
-        """Create GUI widgets"""
-        # Main frame
-        main_frame = ttk.Frame(self.root, padding="20")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
-        # Title
-        title_label = ttk.Label(main_frame, text="QR Code Generator", 
-                               font=('Arial', 16, 'bold'))
-        title_label.grid(row=0, column=0, columnspan=2, pady=(0, 20))
-        
-        # Input fields
-        ttk.Label(main_frame, text="Serial Number:").grid(row=1, column=0, sticky=tk.W, pady=5)
-        self.serial_entry = ttk.Entry(main_frame, width=30)
-        self.serial_entry.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=5, padx=(10, 0))
-        
-        ttk.Label(main_frame, text="Verification Code:").grid(row=2, column=0, sticky=tk.W, pady=5)
-        self.vcode_entry = ttk.Entry(main_frame, width=30)
-        self.vcode_entry.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=5, padx=(10, 0))
-        
-        ttk.Label(main_frame, text="DevUID:").grid(row=3, column=0, sticky=tk.W, pady=5)
-        self.devuid_entry = ttk.Entry(main_frame, width=30)
-        self.devuid_entry.grid(row=3, column=1, sticky=(tk.W, tk.E), pady=5, padx=(10, 0))
-        
-        # Format selection
-        ttk.Label(main_frame, text="QR Format:").grid(row=4, column=0, sticky=tk.W, pady=5)
-        self.format_var = tk.StringVar(value="olarm")
-        format_combo = ttk.Combobox(main_frame, textvariable=self.format_var, width=28, state="readonly")
-        format_combo['values'] = (
-            'olarm', 'json', 'csv', 'pipe', 'compact', 'labeled', 'url'
+    def create_controls(self):
+        """Create Flet UI controls"""
+        # Title - properly centered for all screen sizes
+        self.title = ft.Container(
+            content=ft.Text(
+                "🔲 QR Code Generator",
+                size=28,
+                weight=ft.FontWeight.BOLD,
+                text_align=ft.TextAlign.CENTER,
+                color=ft.Colors.BLUE_700
+            ),
+            alignment=ft.alignment.center,
+            expand=True
         )
-        format_combo.grid(row=4, column=1, sticky=(tk.W, tk.E), pady=5, padx=(10, 0))
+        
+        # Input fields - responsive width
+        self.serial_field = ft.TextField(
+            label="Serial Number",
+            expand=True,
+            autofocus=True
+        )
+        
+        self.vcode_field = ft.TextField(
+            label="Verification Code",
+            expand=True
+        )
+        
+        self.devuid_field = ft.TextField(
+            label="DevUID",
+            expand=True
+        )
+        
+        # Get DevUID button
+        self.get_devuid_btn = ft.OutlinedButton(
+            "🔌 Get DevUID",
+            on_click=self.get_devuid_from_device,
+            tooltip="Extract DevUID from connected STM32 device via ST-Link",
+            style=ft.ButtonStyle(
+                text_style=ft.TextStyle(
+                    size=12,
+                    weight=ft.FontWeight.NORMAL
+                ),
+                alignment=ft.alignment.center,
+                padding=ft.padding.symmetric(horizontal=8, vertical=8),
+                shape=ft.RoundedRectangleBorder(radius=8)
+            )
+        )
+        
+        self.device_name_field = ft.TextField(
+            label="Device Name (Optional)",
+            expand=True,
+            hint_text="e.g., Living Room Sensor"
+        )
+        
+        # Format dropdown - responsive
+        self.format_dropdown = ft.Dropdown(
+            label="QR Format",
+            expand=True,
+            value="olarm",
+            options=[
+                ft.dropdown.Option("olarm", "Olarm (recommended)"),
+                ft.dropdown.Option("json", "JSON"),
+                ft.dropdown.Option("csv", "CSV"),
+                ft.dropdown.Option("pipe", "Pipe-separated"),
+                ft.dropdown.Option("compact", "Compact"),
+                ft.dropdown.Option("labeled", "Labeled"),
+                ft.dropdown.Option("url", "URL")
+            ],
+            on_change=self.on_format_change
+        )
         
         # Format help text
-        self.format_help = ttk.Label(main_frame, text="Olarm (recommended) - Compatible with Olarm validation system", 
-                                    font=('Arial', 8), foreground='gray')
-        self.format_help.grid(row=4, column=1, sticky=tk.W, pady=(25, 0), padx=(10, 0))
+        self.format_help = ft.Text(
+            "Olarm (recommended) - Compatible with Olarm validation system",
+            size=12,
+            color=ft.Colors.GREY,
+            italic=True
+        )
         
-        # Bind format selection change to update help text
-        format_combo.bind('<<ComboboxSelected>>', self.on_format_change)
+        # Buttons - responsive with adaptive height and centered text for all window sizes
+        self.generate_btn = ft.ElevatedButton(
+            "Generate QR Code",
+            on_click=self.generate_qr_code,
+            bgcolor=ft.Colors.BLUE,
+            color=ft.Colors.WHITE,
+            expand=True,
+            style=ft.ButtonStyle(
+                text_style=ft.TextStyle(
+                    size=13,
+                    weight=ft.FontWeight.NORMAL
+                ),
+                alignment=ft.alignment.center,
+                padding=ft.padding.symmetric(horizontal=8, vertical=8),
+                shape=ft.RoundedRectangleBorder(radius=8)
+            )
+        )
         
-        # Buttons frame
-        button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=5, column=0, columnspan=2, pady=20)
+        self.clear_btn = ft.OutlinedButton(
+            "Clear Fields",
+            on_click=self.clear_fields,
+            expand=True,
+            style=ft.ButtonStyle(
+                text_style=ft.TextStyle(
+                    size=13,
+                    weight=ft.FontWeight.NORMAL
+                ),
+                alignment=ft.alignment.center,
+                padding=ft.padding.symmetric(horizontal=8, vertical=8),
+                shape=ft.RoundedRectangleBorder(radius=8)
+            )
+        )
         
-        # Generate button
-        self.generate_btn = ttk.Button(button_frame, text="Generate QR Code", 
-                                      command=self.generate_qr_code)
-        self.generate_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.test_btn = ft.OutlinedButton(
+            "Fill Test Data",
+            on_click=self.fill_test_data,
+            expand=True,
+            style=ft.ButtonStyle(
+                text_style=ft.TextStyle(
+                    size=13,
+                    weight=ft.FontWeight.NORMAL
+                ),
+                alignment=ft.alignment.center,
+                padding=ft.padding.symmetric(horizontal=8, vertical=8),
+                shape=ft.RoundedRectangleBorder(radius=8)
+            )
+        )
         
-        # Clear button
-        self.clear_btn = ttk.Button(button_frame, text="Clear Fields", 
-                                   command=self.clear_fields)
-        self.clear_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.export_btn = ft.OutlinedButton(
+            "Export to Excel",
+            on_click=self.export_to_excel,
+            expand=True,
+            style=ft.ButtonStyle(
+                text_style=ft.TextStyle(
+                    size=13,
+                    weight=ft.FontWeight.NORMAL
+                ),
+                alignment=ft.alignment.center,
+                padding=ft.padding.symmetric(horizontal=8, vertical=8),
+                shape=ft.RoundedRectangleBorder(radius=8)
+            )
+        )
         
-        # View Records button
-        self.view_btn = ttk.Button(button_frame, text="View All Records", 
-                                  command=self.view_records)
-        self.view_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.remove_btn = ft.OutlinedButton(
+            "Remove Selected Record",
+            on_click=self.remove_record,
+            expand=True,
+            style=ft.ButtonStyle(
+                text_style=ft.TextStyle(
+                    size=13,
+                    weight=ft.FontWeight.NORMAL
+                ),
+                alignment=ft.alignment.center,
+                padding=ft.padding.symmetric(horizontal=8, vertical=8),
+                shape=ft.RoundedRectangleBorder(radius=8)
+            )
+        )
         
-        # Remove Record button
-        self.remove_btn = ttk.Button(button_frame, text="Remove Record", 
-                                    command=self.remove_record)
-        self.remove_btn.pack(side=tk.LEFT, padx=(0, 10))
+
         
-        # Export to Excel button
-        self.export_btn = ttk.Button(button_frame, text="Export to Excel", 
-                                    command=self.export_to_excel)
-        self.export_btn.pack(side=tk.LEFT, padx=(0, 10))
+        # QR Code preview - responsive
+        self.qr_image = ft.Image(
+            width=180,
+            height=180,
+            fit=ft.ImageFit.CONTAIN
+        )
         
-        # Fill Test Data button
-        self.test_btn = ttk.Button(button_frame, text="Fill Test Data", 
-                                  command=self.fill_test_data)
-        self.test_btn.pack(side=tk.LEFT)
+        # Records table - responsive with custom selection and QR display
+        self.records_table = ft.DataTable(
+            columns=[
+                ft.DataColumn(ft.Container(
+                    content=ft.Text("Select", weight=ft.FontWeight.BOLD, size=11, text_align=ft.TextAlign.CENTER),
+                    alignment=ft.alignment.center,
+                    expand=True
+                )),
+                ft.DataColumn(ft.Container(
+                    content=ft.Text("ID", weight=ft.FontWeight.BOLD, size=11, text_align=ft.TextAlign.CENTER),
+                    alignment=ft.alignment.center,
+                    expand=True
+                )),
+                ft.DataColumn(ft.Container(
+                    content=ft.Text("QR", weight=ft.FontWeight.BOLD, size=11, text_align=ft.TextAlign.CENTER),
+                    alignment=ft.alignment.center,
+                    expand=True
+                )),
+                ft.DataColumn(ft.Container(
+                    content=ft.Text("Serial Number", weight=ft.FontWeight.BOLD, size=11, text_align=ft.TextAlign.CENTER),
+                    alignment=ft.alignment.center,
+                    expand=True
+                )),
+                ft.DataColumn(ft.Container(
+                    content=ft.Text("V-Code", weight=ft.FontWeight.BOLD, size=11, text_align=ft.TextAlign.CENTER),
+                    alignment=ft.alignment.center,
+                    expand=True
+                )),
+                ft.DataColumn(ft.Container(
+                    content=ft.Text("DevUID", weight=ft.FontWeight.BOLD, size=11, text_align=ft.TextAlign.CENTER),
+                    alignment=ft.alignment.center,
+                    expand=True
+                )),
+                ft.DataColumn(ft.Container(
+                    content=ft.Text("Device Name", weight=ft.FontWeight.BOLD, size=11, text_align=ft.TextAlign.CENTER),
+                    alignment=ft.alignment.center,
+                    expand=True
+                )),
+                ft.DataColumn(ft.Container(
+                    content=ft.Text("Created", weight=ft.FontWeight.BOLD, size=11, text_align=ft.TextAlign.CENTER),
+                    alignment=ft.alignment.center,
+                    expand=True
+                )),
+            ],
+            rows=[],
+            horizontal_lines=ft.border.BorderSide(0.5, ft.Colors.GREY),
+            column_spacing=8,
+        )
         
-        # QR Code preview frame
-        preview_frame = ttk.LabelFrame(main_frame, text="QR Code Preview", padding="10")
-        preview_frame.grid(row=6, column=0, columnspan=2, pady=20, sticky=(tk.W, tk.E))
+        # Status text - properly centered in container
+        self.status_text = ft.Text(
+            "✅ Ready to generate QR codes",
+            size=13,
+            color=ft.Colors.GREEN,
+            text_align=ft.TextAlign.CENTER,
+            weight=ft.FontWeight.W_500
+        )
         
-        self.qr_label = ttk.Label(preview_frame, text="QR Code will appear here")
-        self.qr_label.pack()
-        
-        # Records table frame
-        table_frame = ttk.LabelFrame(main_frame, text="Recent Records", padding="10")
-        table_frame.grid(row=7, column=0, columnspan=2, pady=20, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
-        # Treeview for records
-        columns = ('ID', 'Serial Number', 'Verification Code', 'DevUID', 'Created At')
-        self.tree = ttk.Treeview(table_frame, columns=columns, show='headings', height=8)
-        
-        # Define headings
-        for col in columns:
-            self.tree.heading(col, text=col)
-            self.tree.column(col, width=120)
-        
-        # Scrollbar for treeview
-        scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
-        
-        self.tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
-        
-        # Configure grid weights
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
-        main_frame.columnconfigure(1, weight=1)
-        main_frame.rowconfigure(7, weight=1)
-        table_frame.columnconfigure(0, weight=1)
-        table_frame.rowconfigure(0, weight=1)
+        # Initialize selected record
+        self.selected_record_id = None
     
-    def generate_qr_code(self):
+    def build(self):
+        """Build the page layout with responsive design"""
+        
+        # DevUID field with Get DevUID button
+        devuid_row = ft.Row([
+            ft.Container(content=self.devuid_field, expand=True),
+            ft.Container(
+                content=self.get_devuid_btn,
+                width=120,
+                padding=ft.padding.only(left=5)
+            )
+        ], spacing=5)
+        
+        # Input fields section - responsive with better spacing
+        input_fields_section = ft.ResponsiveRow([
+            ft.Container(
+                content=ft.Column([
+                    self.serial_field,
+                    self.vcode_field,
+                    devuid_row,
+                    self.device_name_field,
+                ], spacing=10),
+                col={"sm": 12, "md": 6, "lg": 6},
+                padding=8,
+                alignment=ft.alignment.center
+            ),
+            ft.Container(
+                content=ft.Column([
+                    self.format_dropdown,
+                    self.format_help,
+                ], spacing=10),
+                col={"sm": 12, "md": 6, "lg": 6},
+                padding=8,
+                alignment=ft.alignment.center
+            ),
+        ])
+        
+        # Main buttons section - responsive with proper column sizing for all window sizes
+        buttons_section = ft.ResponsiveRow([
+            ft.Container(
+                content=self.generate_btn,
+                col={"sm": 12, "md": 12, "lg": 3},
+                padding=3,
+                alignment=ft.alignment.center
+            ),
+            ft.Container(
+                content=self.clear_btn,
+                col={"sm": 6, "md": 6, "lg": 2},
+                padding=3,
+                alignment=ft.alignment.center
+            ),
+            ft.Container(
+                content=self.test_btn,
+                col={"sm": 6, "md": 6, "lg": 2},
+                padding=3,
+                alignment=ft.alignment.center
+            ),
+            ft.Container(
+                content=self.export_btn,
+                col={"sm": 6, "md": 6, "lg": 2},
+                padding=3,
+                alignment=ft.alignment.center
+            ),
+            ft.Container(
+                content=self.remove_btn,
+                col={"sm": 6, "md": 6, "lg": 3},
+                padding=3,
+                alignment=ft.alignment.center
+            ),
+        ])
+        
+
+        
+        # Input section container
+        input_section = ft.Container(
+            content=ft.Column([
+                input_fields_section,
+                buttons_section,
+                ft.Container(
+                    content=self.status_text,
+                    alignment=ft.alignment.center,
+                    padding=ft.padding.symmetric(vertical=5),
+                    expand=True
+                ),
+            ], spacing=15),
+            padding=15,
+            border=ft.border.all(1, ft.Colors.GREY_300),
+            border_radius=10,
+            expand=False
+        )
+        
+        # QR Preview section - responsive
+        qr_preview_section = ft.Container(
+            content=ft.Column([
+                ft.Container(
+                    content=ft.Text("📱 QR Code Preview", size=16, weight=ft.FontWeight.BOLD, text_align=ft.TextAlign.CENTER, color=ft.Colors.BLUE_700),
+                    alignment=ft.alignment.center,
+                    expand=True
+                ),
+                ft.Container(
+                    content=self.qr_image,
+                    alignment=ft.alignment.center,
+                    padding=10,
+                    border=ft.border.all(1, ft.Colors.GREY_200),
+                    border_radius=5
+                ),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+            padding=15,
+            border=ft.border.all(1, ft.Colors.GREY_300),
+            border_radius=10
+        )
+        
+        # Main input and preview row - responsive with better alignment
+        main_row = ft.ResponsiveRow([
+            ft.Container(
+                content=input_section,
+                col={"sm": 12, "md": 12, "lg": 8},
+                padding=8,
+                alignment=ft.alignment.center
+            ),
+            ft.Container(
+                content=qr_preview_section,
+                col={"sm": 12, "md": 12, "lg": 4},
+                padding=8,
+                alignment=ft.alignment.center
+            ),
+        ])
+        
+        # Records section - responsive with scrolling
+        records_section = ft.Container(
+            content=ft.Column([
+                ft.Container(
+                    content=ft.Text("📊 Recent Records", size=16, weight=ft.FontWeight.BOLD, text_align=ft.TextAlign.CENTER, color=ft.Colors.BLUE_700),
+                    alignment=ft.alignment.center,
+                    expand=True
+                ),
+                ft.Container(
+                    content=ft.Row([
+                        ft.Container(
+                            content=self.records_table,
+                            alignment=ft.alignment.center,
+                            expand=True
+                        )
+                    ], scroll=ft.ScrollMode.AUTO, alignment=ft.MainAxisAlignment.CENTER),
+                    height=400,
+                    border=ft.border.all(1, ft.Colors.GREY_300),
+                    border_radius=5,
+                    padding=5
+                )
+            ], spacing=10),
+            padding=15,
+            border=ft.border.all(1, ft.Colors.GREY_300),
+            border_radius=10,
+            margin=ft.margin.only(top=10)
+        )
+        
+        # Main layout - responsive
+        main_content = ft.Column([
+            self.title,
+            main_row,
+            records_section,
+        ], spacing=15, expand=True, scroll=ft.ScrollMode.AUTO)
+        
+        # Add to page
+        self.page.add(main_content)
+    
+    def on_format_change(self, e):
+        """Update help text when format selection changes"""
+        format_descriptions = {
+            'olarm': 'Olarm (recommended) - Compatible with Olarm validation system',
+            'json': 'JSON - Structured data format {"sn":"...","vc":"...","uid":"..."}',
+            'csv': 'CSV - Comma-separated values: serial,verification,devuid',
+            'pipe': 'Pipe - Pipe-separated values: serial|verification|devuid',
+            'compact': 'Compact - Colon-separated: serial:verification:devuid',
+            'labeled': 'Labeled - Human-readable with labels (old format)',
+            'url': 'URL - Generic validation URL format'
+        }
+        selected_format = self.format_dropdown.value
+        self.format_help.value = format_descriptions.get(selected_format, '')
+        self.page.update()
+    
+    def generate_qr_code(self, e):
         """Generate QR code with input data"""
-        serial_number = self.serial_entry.get().strip()
-        verification_code = self.vcode_entry.get().strip()
-        dev_uid = self.devuid_entry.get().strip()
-        format_type = self.format_var.get()
+        serial_number = self.serial_field.value.strip() if self.serial_field.value else ""
+        verification_code = self.vcode_field.value.strip() if self.vcode_field.value else ""
+        dev_uid = self.devuid_field.value.strip() if self.devuid_field.value else ""
+        device_name = self.device_name_field.value.strip() if self.device_name_field.value else ""
+        format_type = self.format_dropdown.value
         
         # Validate inputs
         if not all([serial_number, verification_code, dev_uid]):
-            messagebox.showerror("Error", "Please fill in all fields")
+            self.show_error("Please fill in all fields")
             return
         
         try:
             # Create QR code
             qr = qrcode.QRCode(
                 version=1,
-                error_correction=qrcode.constants.ERROR_CORRECT_M,  # Changed to Medium for better reliability
+                error_correction=qrcode.constants.ERROR_CORRECT_M,
                 box_size=10,
                 border=4,
             )
             
             # Prepare QR code data based on format type
             if format_type == "json":
-                import json
                 qr_data = json.dumps({
                     "sn": serial_number,
                     "vc": verification_code,
                     "uid": dev_uid
-                }, separators=(',', ':'))  # Compact JSON
+                }, separators=(',', ':'))
             elif format_type == "csv":
                 qr_data = f"{serial_number},{verification_code},{dev_uid}"
             elif format_type == "pipe":
                 qr_data = f"{serial_number}|{verification_code}|{dev_uid}"
             elif format_type == "labeled":
-                # Old format with labels
                 qr_data = f"Serial Number: {serial_number}\nVerification Code: {verification_code}\nDevUID: {dev_uid}"
             elif format_type == "compact":
-                # Very compact format
                 qr_data = f"{serial_number}:{verification_code}:{dev_uid}"
             elif format_type == "url":
-                # URL format for web validation (generic)
                 qr_data = f"https://validate.example.com?sn={serial_number}&vc={verification_code}&uid={dev_uid}"
             elif format_type == "olarm":
-                # Olarm specific URL format: serial,devuid,verification_code
                 qr_data = f"https://olarm.com/o/flxr?a={serial_number},{dev_uid},{verification_code}"
             else:
-                # Default to Olarm if invalid format specified
                 qr_data = f"https://olarm.com/o/flxr?a={serial_number},{dev_uid},{verification_code}"
             
             qr.add_data(qr_data)
@@ -281,121 +541,310 @@ class QRGeneratorApp:
             self.display_qr_preview(qr_image)
             
             # Save to database
-            self.save_to_database(serial_number, verification_code, dev_uid, filename)
+            self.save_to_database(serial_number, verification_code, dev_uid, device_name, filename)
             
             # Auto-export to Excel after each new record
             try:
                 self.export_to_excel_silent()
             except:
-                pass  # Don't show error if auto-export fails
+                pass
             
             # Refresh records table
             self.load_records()
             
-            messagebox.showinfo("Success", f"QR code generated successfully!\n\nFile: {filename}\nFormat: {format_type}\nContent: {qr_data[:100]}{'...' if len(qr_data) > 100 else ''}")
+            # Show success message
+            self.show_success(f"QR code generated successfully! File: {filename}")
             
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to generate QR code: {str(e)}")
+            self.show_error(f"Failed to generate QR code: {str(e)}")
     
     def display_qr_preview(self, qr_image):
         """Display QR code in the preview area"""
-        # Resize image for preview
-        preview_size = (200, 200)
-        qr_preview = qr_image.resize(preview_size, Image.Resampling.LANCZOS)
-        
-        # Convert to PhotoImage
-        self.qr_photo = ImageTk.PhotoImage(qr_preview)
-        
-        # Update label
-        self.qr_label.configure(image=self.qr_photo, text="")
+        try:
+            # Convert PIL image to base64 for Flet
+            img_buffer = io.BytesIO()
+            qr_image.save(img_buffer, format='PNG')
+            img_buffer.seek(0)
+            
+            # Convert to base64
+            img_base64 = base64.b64encode(img_buffer.read()).decode()
+            
+            # Update image
+            self.qr_image.src_base64 = img_base64
+            self.page.update()
+        except Exception as e:
+            print(f"Error displaying QR preview: {e}")
     
-    def save_to_database(self, serial_number, verification_code, dev_uid, filename):
+    def save_to_database(self, serial_number, verification_code, dev_uid, device_name, filename):
         """Save record to database"""
         try:
-            # Find the lowest available ID (reuse deleted numbers)
-            # First check if there are any records
-            self.cursor.execute('SELECT COUNT(*) FROM qr_records')
-            record_count = self.cursor.fetchone()[0]
-            
-            if record_count == 0:
-                next_id = 1
-            else:
-                # Look for gaps in the sequence starting from 1
-                self.cursor.execute('SELECT id FROM qr_records ORDER BY id')
-                existing_ids = [row[0] for row in self.cursor.fetchall()]
-                
-                # Find the first missing number in sequence
-                next_id = 1
-                for existing_id in existing_ids:
-                    if next_id == existing_id:
-                        next_id += 1
-                    else:
-                        break
+            # Find the next available ID
+            self.cursor.execute('SELECT MAX(id) FROM qr_records')
+            max_id = self.cursor.fetchone()[0]
+            next_id = (max_id + 1) if max_id else 1
             
             # Insert with specific ID
             self.cursor.execute('''
-                INSERT INTO qr_records (id, serial_number, verification_code, dev_uid, qr_filename)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (next_id, serial_number, verification_code, dev_uid, filename))
+                INSERT INTO qr_records (id, serial_number, verification_code, dev_uid, device_name, qr_filename)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (next_id, serial_number, verification_code, dev_uid, device_name, filename))
             self.conn.commit()
             
-            print(f"Record saved with ID: {next_id}")
+            print(f"Record saved with ID: {next_id}" + (f" (Device: {device_name})" if device_name else ""))
             
         except Exception as e:
-            messagebox.showerror("Database Error", f"Failed to save to database: {str(e)}")
+            self.show_error(f"Failed to save to database: {str(e)}")
+    
+    def create_qr_thumbnail(self, qr_filename):
+        """Create a small QR code thumbnail for table display"""
+        try:
+            if qr_filename and os.path.exists(qr_filename):
+                # Load and resize the QR code image
+                with Image.open(qr_filename) as img:
+                    # Resize to medium thumbnail (doubled size)
+                    img_resized = img.resize((80, 80), Image.Resampling.LANCZOS)
+                    
+                    # Convert to base64
+                    img_buffer = io.BytesIO()
+                    img_resized.save(img_buffer, format='PNG')
+                    img_buffer.seek(0)
+                    img_base64 = base64.b64encode(img_buffer.read()).decode()
+                    
+                    # Return medium image
+                    return ft.Image(
+                        src_base64=img_base64,
+                        width=80,
+                        height=80,
+                        fit=ft.ImageFit.CONTAIN,
+                        tooltip="Click to view full size"
+                    )
+            else:
+                # Return placeholder text
+                return ft.Text(
+                    "📄",
+                    size=16,
+                    text_align=ft.TextAlign.CENTER,
+                    tooltip="QR file not found"
+                )
+        except Exception as e:
+            print(f"Error creating QR thumbnail: {e}")
+            return ft.Text(
+                "❌",
+                size=16,
+                text_align=ft.TextAlign.CENTER,
+                tooltip="Error loading QR"
+            )
     
     def load_records(self):
-        """Load records from database into treeview"""
-        # Clear existing records
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        
-        # Fetch records from database
+        """Load records from database into table"""
         try:
             self.cursor.execute('''
-                SELECT id, serial_number, verification_code, dev_uid, created_at
+                SELECT id, serial_number, verification_code, dev_uid, created_at, qr_filename, device_name
                 FROM qr_records
                 ORDER BY created_at DESC
                 LIMIT 20
             ''')
             records = self.cursor.fetchall()
             
-            # Insert records into treeview
+            # Clear existing rows
+            self.records_table.rows.clear()
+            
+            # Add records to table
             for record in records:
-                # Format datetime
-                created_at = datetime.fromisoformat(record[4]).strftime("%Y-%m-%d %H:%M:%S")
-                self.tree.insert('', 'end', values=(record[0], record[1], record[2], record[3], created_at))
+                try:
+                    created_at = datetime.fromisoformat(record[4]).strftime("%m-%d %H:%M")
+                except:
+                    created_at = str(record[4])[:10]
+                    
+                # Display more of the data with less truncation
+                serial_display = record[1][:18] + "..." if len(record[1]) > 18 else record[1]
+                devuid_display = record[3][:16] + "..." if len(record[3]) > 16 else record[3]
+                device_name = record[6] if len(record) > 6 and record[6] else ""
+                device_name_display = device_name[:15] + "..." if len(device_name) > 15 else device_name
                 
+                # Create select button for this row
+                record_id = str(record[0])
+                is_selected = record_id == self.selected_record_id
+                
+                select_btn = ft.ElevatedButton(
+                    "✓" if is_selected else "○",
+                    height=28,
+                    width=35,
+                    bgcolor=ft.Colors.GREEN if is_selected else ft.Colors.GREY_200,
+                    color=ft.Colors.WHITE if is_selected else ft.Colors.BLACK,
+                    on_click=lambda e, rid=record_id: self.select_record(rid),
+                    style=ft.ButtonStyle(
+                        text_style=ft.TextStyle(
+                            size=14,
+                            weight=ft.FontWeight.BOLD
+                        ),
+                        alignment=ft.alignment.center,
+                        padding=ft.padding.all(0)
+                    )
+                )
+                
+                # Create QR code thumbnail
+                qr_display = self.create_qr_thumbnail(record[5] if len(record) > 5 else None)
+                
+                # Create row with all columns - all text properly centered in containers
+                row = ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Container(content=select_btn, alignment=ft.alignment.center, expand=True)),
+                        ft.DataCell(ft.Container(
+                            content=ft.Text(str(record[0]), size=10, text_align=ft.TextAlign.CENTER, weight=ft.FontWeight.BOLD),
+                            alignment=ft.alignment.center,
+                            expand=True
+                        )),
+                        ft.DataCell(ft.Container(content=qr_display, alignment=ft.alignment.center, expand=True)),
+                        ft.DataCell(ft.Container(
+                            content=ft.Text(serial_display, size=10, text_align=ft.TextAlign.CENTER),
+                            alignment=ft.alignment.center,
+                            expand=True
+                        )),
+                        ft.DataCell(ft.Container(
+                            content=ft.Text(record[2], size=10, text_align=ft.TextAlign.CENTER),
+                            alignment=ft.alignment.center,
+                            expand=True
+                        )),
+                        ft.DataCell(ft.Container(
+                            content=ft.Text(devuid_display, size=10, text_align=ft.TextAlign.CENTER),
+                            alignment=ft.alignment.center,
+                            expand=True
+                        )),
+                        ft.DataCell(ft.Container(
+                            content=ft.Text(device_name_display or "-", size=10, text_align=ft.TextAlign.CENTER, italic=not device_name_display),
+                            alignment=ft.alignment.center,
+                            expand=True
+                        )),
+                        ft.DataCell(ft.Container(
+                            content=ft.Text(created_at, size=10, text_align=ft.TextAlign.CENTER),
+                            alignment=ft.alignment.center,
+                            expand=True
+                        )),
+                    ],
+                    color=ft.Colors.BLUE_50 if is_selected else None
+                )
+                
+                # Store record ID as data for easy access
+                row.data = record_id
+                
+                self.records_table.rows.append(row)
+            
+            self.page.update()
+            
         except Exception as e:
-            messagebox.showerror("Database Error", f"Failed to load records: {str(e)}")
+            self.show_error(f"Failed to load records: {str(e)}")
     
-    def on_format_change(self, event=None):
-        """Update help text when format selection changes"""
-        format_descriptions = {
-            'olarm': 'Olarm (recommended) - Compatible with Olarm validation system',
-            'json': 'JSON - Structured data format {"sn":"...","vc":"...","uid":"..."}',
-            'csv': 'CSV - Comma-separated values: serial,verification,devuid',
-            'pipe': 'Pipe - Pipe-separated values: serial|verification|devuid',
-            'compact': 'Compact - Colon-separated: serial:verification:devuid',
-            'labeled': 'Labeled - Human-readable with labels (old format)',
-            'url': 'URL - Generic validation URL format'
-        }
-        selected_format = self.format_var.get()
-        self.format_help.configure(text=format_descriptions.get(selected_format, ''))
+    def select_record(self, record_id):
+        """Select or deselect a record using custom button"""
+        try:
+            if self.selected_record_id == record_id:
+                # Deselect if already selected
+                self.selected_record_id = None
+                print(f"❌ Deselected record ID: {record_id}")
+                self.show_success("No record selected")
+            else:
+                # Select the record
+                self.selected_record_id = record_id
+                print(f"✅ Selected record ID: {record_id}")
+                self.show_success(f"✅ Selected record ID: {record_id}. Click 'Remove Selected Record' to delete.")
+            
+            # Refresh the table to update button states
+            self.load_records()
+            
+        except Exception as ex:
+            print(f"❌ Error in record selection: {ex}")
+            self.show_error(f"Selection error: {ex}")
     
-    def clear_fields(self):
+    def get_devuid_from_device(self, e):
+        """Extract DevUID from connected STM32 device using OpenOCD"""
+        try:
+            self.show_success("🔌 Connecting to STM32 device...")
+            
+            # OpenOCD command configuration
+            WL_DEVUI_ADDRESS = "0x1FFF7580"
+            openocd_cmd = [
+                './openocd/bin/openocd',
+                '-f', 'interface/stlink.cfg',
+                '-f', 'target/stm32wlx.cfg',
+                '-c', 'init',
+                '-c', 'reset halt',
+                '-c', f'mdw {WL_DEVUI_ADDRESS} 3',
+                '-c', 'exit'
+            ]
+            
+            # Run OpenOCD command with timeout
+            result = subprocess.run(
+                openocd_cmd,
+                capture_output=True,
+                text=True,
+                timeout=15,  # 15 second timeout
+                cwd=os.getcwd()  # Run in current directory
+            )
+            
+            if result.returncode != 0:
+                self.show_error(f"❌ OpenOCD failed: {result.stderr.strip()}")
+                return
+            
+            # Parse the output to extract DevUID
+            output_lines = result.stdout.split('\n')
+            
+            for line in output_lines:
+                if WL_DEVUI_ADDRESS.lower() in line.lower():
+                    # Split the line and extract the hex values
+                    parts = line.split()
+                    if len(parts) >= 4:  # Should have address and 3 hex values
+                        try:
+                            # Extract the hex values (skip the address)
+                            hex_values = parts[1:4]
+                            
+                            # Combine and format the DevUID
+                            # Reverse byte order for proper UID format
+                            devui = hex_values[1] + hex_values[0]  # Combine first two hex values
+                            
+                            # Format as uppercase hex string without spaces
+                            formatted_uid = devui.upper().replace('0X', '')
+                            
+                            # Remove any extra characters and ensure it's clean hex
+                            clean_uid = ''.join(c for c in formatted_uid if c in '0123456789ABCDEF')
+                            
+                            if len(clean_uid) >= 16:  # Valid DevUID should be at least 16 hex chars
+                                self.devuid_field.value = clean_uid
+                                self.show_success(f"✅ DevUID extracted: {clean_uid}")
+                                self.page.update()
+                                return
+                            else:
+                                self.show_error(f"❌ Invalid DevUID format: {clean_uid}")
+                                return
+                                
+                        except (IndexError, ValueError) as e:
+                            self.show_error(f"❌ Error parsing DevUID: {str(e)}")
+                            return
+            
+            self.show_error("❌ DevUID not found in OpenOCD output")
+            
+        except subprocess.TimeoutExpired:
+            self.show_error("❌ Timeout: Device connection failed. Check ST-Link connection.")
+        except FileNotFoundError:
+            self.show_error("❌ OpenOCD not found. Please ensure OpenOCD is installed and available.")
+        except Exception as e:
+            self.show_error(f"❌ Error extracting DevUID: {str(e)}")
+    
+    def clear_fields(self, e):
         """Clear all input fields"""
-        self.serial_entry.delete(0, tk.END)
-        self.vcode_entry.delete(0, tk.END)
-        self.devuid_entry.delete(0, tk.END)
-        self.qr_label.configure(image='', text="QR Code will appear here")
+        self.serial_field.value = ""
+        self.vcode_field.value = ""
+        self.devuid_field.value = ""
+        self.device_name_field.value = ""
+        self.qr_image.src_base64 = None
+        self.status_text.value = "Fields cleared"
+        self.status_text.color = ft.Colors.GREEN
+        self.page.update()
     
-    def fill_test_data(self):
+    def fill_test_data(self, e):
         """Fill fields with test data for easy testing"""
-        import random
-        
         # Clear existing data first
-        self.clear_fields()
+        self.clear_fields(e)
         
         # Generate test data
         test_serial = f"TEST{random.randint(100000000000, 999999999999)}"
@@ -403,13 +852,17 @@ class QRGeneratorApp:
         test_devuid = f"{''.join(random.choices('0123456789ABCDEF', k=16))}"
         
         # Fill the fields
-        self.serial_entry.insert(0, test_serial)
-        self.vcode_entry.insert(0, test_vcode)
-        self.devuid_entry.insert(0, test_devuid)
+        self.serial_field.value = test_serial
+        self.vcode_field.value = test_vcode
+        self.devuid_field.value = test_devuid
         
         # Set format to Olarm (default)
-        self.format_var.set("olarm")
-        self.on_format_change()
+        self.format_dropdown.value = "olarm"
+        self.on_format_change(None)
+        
+        self.status_text.value = "Test data filled"
+        self.status_text.color = ft.Colors.BLUE
+        self.page.update()
         
         print(f"📝 Test data filled:")
         print(f"   Serial: {test_serial}")
@@ -417,334 +870,147 @@ class QRGeneratorApp:
         print(f"   DevUID: {test_devuid}")
         print(f"   Format: olarm")
     
-    def remove_record(self):
+    def remove_record(self, e):
         """Remove a selected record from the database"""
-        # Get selected item from treeview
-        selected_item = self.tree.selection()
-        
-        if not selected_item:
-            messagebox.showwarning("No Selection", "Please select a record from the table to remove.")
+        if not self.selected_record_id:
+            self.show_error("❌ No record selected! Please click the '○' button next to a record to select it first.")
             return
         
-        # Get record details
-        item = self.tree.item(selected_item[0])
-        record_values = item['values']
-        record_id = record_values[0]  # ID is the first column
-        serial_number = record_values[1]
-        
-        # Confirm deletion
-        confirm = messagebox.askyesno(
-            "Confirm Deletion", 
-            f"Are you sure you want to delete record ID {record_id}?\n\n"
-            f"Serial Number: {serial_number}\n\n"
-            f"This will also delete the QR code file.",
-            icon='warning'
-        )
-        
-        if not confirm:
-            return
+        record_id = self.selected_record_id
         
         try:
             # Get QR filename from database
-            self.cursor.execute('SELECT qr_filename FROM qr_records WHERE id = ?', (record_id,))
+            self.cursor.execute('SELECT qr_filename, serial_number FROM qr_records WHERE id = ?', (record_id,))
             result = self.cursor.fetchone()
             
             if result:
-                qr_filename = result[0]
+                qr_filename, serial_number = result
                 
                 # Delete the QR code file if it exists
                 if os.path.exists(qr_filename):
-                    try:
-                        os.remove(qr_filename)
-                        print(f"Deleted QR code file: {qr_filename}")
-                    except Exception as e:
-                        print(f"Warning: Could not delete QR code file {qr_filename}: {e}")
+                    os.remove(qr_filename)
+                    print(f"Deleted QR code file: {qr_filename}")
                 
                 # Delete from database
                 self.cursor.execute('DELETE FROM qr_records WHERE id = ?', (record_id,))
                 self.conn.commit()
                 
+                # Clear selection
+                self.selected_record_id = None
+                
                 # Auto-update Excel file
                 try:
                     self.export_to_excel_silent()
                 except:
-                    pass  # Don't show error if auto-export fails
+                    pass
                 
                 # Refresh records table
                 self.load_records()
                 
-                # Clear QR preview if it was showing the deleted record
-                self.qr_label.configure(image='', text="QR Code will appear here")
+                # Clear QR preview
+                self.qr_image.src_base64 = None
                 
-                messagebox.showinfo("Success", f"Record ID {record_id} deleted successfully!")
+                self.show_success(f"Record ID {record_id} (Serial: {serial_number}) deleted successfully!")
+                
             else:
-                messagebox.showerror("Error", f"Record ID {record_id} not found in database.")
+                self.show_error(f"Record ID {record_id} not found in database.")
                 
         except Exception as e:
-            messagebox.showerror("Database Error", f"Failed to delete record: {str(e)}")
+            self.show_error(f"Failed to delete record: {str(e)}")
     
-    def export_to_excel(self):
+
+    def export_to_excel(self, e):
         """Export all records to Excel with QR code images"""
         try:
-            from openpyxl import Workbook
-            from openpyxl.drawing.image import Image as OpenpyxlImage
-            from openpyxl.styles import Font, Alignment, PatternFill
-            
-            # Fetch all records from database
-            self.cursor.execute('''
-                SELECT id, serial_number, verification_code, dev_uid, qr_filename, created_at
-                FROM qr_records
-                ORDER BY created_at ASC
-            ''')
-            records = self.cursor.fetchall()
-            
-            if not records:
-                messagebox.showinfo("No Data", "No records found to export.")
-                return
-            
-            # Create workbook and worksheet
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "QR Code Records"
-            
-            # Define headers
-            headers = ['#', 'ID', 'Serial Number', 'Verification Code', 'DevUID', 'QR Code', 'Created At']
-            
-            # Style for headers
-            header_font = Font(bold=True, color="FFFFFF")
-            header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
-            header_alignment = Alignment(horizontal="center", vertical="center")
-            
-            # Write headers
-            for col, header in enumerate(headers, 1):
-                cell = ws.cell(row=1, column=col, value=header)
-                cell.font = header_font
-                cell.fill = header_fill
-                cell.alignment = header_alignment
-            
-            # Set column widths
-            column_widths = [5, 8, 20, 18, 20, 25, 22]
-            for col, width in enumerate(column_widths, 1):
-                ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = width
-            
-            # Write data and embed QR codes
-            for row_idx, record in enumerate(records, 2):
-                # Write sequential number and data
-                ws.cell(row=row_idx, column=1, value=row_idx - 1)  # Sequential number (#)
-                ws.cell(row=row_idx, column=2, value=record[0])  # ID
-                ws.cell(row=row_idx, column=3, value=record[1])  # Serial Number
-                ws.cell(row=row_idx, column=4, value=record[2])  # Verification Code
-                ws.cell(row=row_idx, column=5, value=record[3])  # DevUID
-                
-                # Format created_at
-                created_at = datetime.fromisoformat(record[5]).strftime("%Y-%m-%d %H:%M:%S")
-                ws.cell(row=row_idx, column=7, value=created_at)  # Created At
-                
-                # Add QR code image if file exists
-                qr_filename = record[4]
-                if os.path.exists(qr_filename):
-                    try:
-                        # Insert image into Excel directly
-                        img_excel = OpenpyxlImage(qr_filename)
-                        
-                        # Resize the image in Excel (width and height in points)
-                        img_excel.width = 120  # approximately 150 pixels
-                        img_excel.height = 120  # approximately 150 pixels
-                        
-                        # Position the image in the QR Code column (column F)
-                        img_excel.anchor = f"F{row_idx}"
-                        ws.add_image(img_excel)
-                        
-                        # Set row height to accommodate image (in points)
-                        ws.row_dimensions[row_idx].height = 90
-                        
-                    except Exception as e:
-                        ws.cell(row=row_idx, column=6, value=f"Error loading: {qr_filename}")
-                        print(f"Warning: Could not load QR code image {qr_filename}: {e}")
-                else:
-                    ws.cell(row=row_idx, column=6, value=f"File not found: {qr_filename}")
-            
-            # Use fixed filename that gets overwritten
-            excel_filename = "qr_records.xlsx"
-            
-            # Save workbook
-            wb.save(excel_filename)
-            
-            # Automatically open the Excel file
-            try:
-                import subprocess
-                import sys
-                
-                if sys.platform == "darwin":  # macOS
-                    subprocess.run(["open", excel_filename])
-                elif sys.platform == "win32":  # Windows
-                    subprocess.run(["start", excel_filename], shell=True)
-                else:  # Linux
-                    subprocess.run(["xdg-open", excel_filename])
-                    
-                print(f"📂 Opened {excel_filename} with default application")
-            except Exception as e:
-                print(f"⚠️  Could not auto-open file: {e}")
-            
-            messagebox.showinfo(
-                "Export Successful", 
-                f"Excel export completed successfully!\n\n"
-                f"📁 File: {excel_filename}\n"
-                f"📊 Records: {len(records)} exported with QR code images\n"
-                f"📂 File opened automatically\n"
-                f"📝 Note: File will be overwritten on next export"
-            )
-            
-        except ImportError:
-            messagebox.showerror(
-                "Missing Dependency", 
-                "openpyxl package is required for Excel export.\n\n"
-                "Please install it with:\npip install openpyxl"
-            )
+            self.export_to_excel_silent()
+            self.show_success("📊 Excel file updated: qr_records.xlsx")
         except Exception as e:
-            messagebox.showerror("Export Error", f"Failed to export to Excel: {str(e)}")
+            self.show_error(f"Failed to export to Excel: {str(e)}")
     
     def export_to_excel_silent(self):
-        """Export all records to Excel silently (no dialog boxes)"""
+        """Export all records to Excel silently"""
         try:
-            from openpyxl import Workbook
-            from openpyxl.drawing.image import Image as OpenpyxlImage
-            from openpyxl.styles import Font, Alignment, PatternFill
-            
             # Fetch all records from database
             self.cursor.execute('''
-                SELECT id, serial_number, verification_code, dev_uid, qr_filename, created_at
+                SELECT id, serial_number, verification_code, dev_uid, device_name, qr_filename, created_at
                 FROM qr_records
                 ORDER BY created_at ASC
             ''')
             records = self.cursor.fetchall()
             
-            if not records:
-                return
-            
             # Create workbook and worksheet
             wb = Workbook()
             ws = wb.active
-            ws.title = "QR Code Records"
+            ws.title = "QR Records"
             
-            # Define headers
-            headers = ['#', 'ID', 'Serial Number', 'Verification Code', 'DevUID', 'QR Code', 'Created At']
-            
-            # Style for headers
-            header_font = Font(bold=True, color="FFFFFF")
-            header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
-            header_alignment = Alignment(horizontal="center", vertical="center")
-            
-            # Write headers
+            # Headers
+            headers = ['ID', 'Serial Number', 'Verification Code', 'DevUID', 'Device Name', 'QR Code', 'Created At']
             for col, header in enumerate(headers, 1):
                 cell = ws.cell(row=1, column=col, value=header)
-                cell.font = header_font
-                cell.fill = header_fill
-                cell.alignment = header_alignment
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color="CCCCCC", end_color="CCCCCC", fill_type="solid")
+                cell.alignment = Alignment(horizontal="center")
             
-            # Set column widths
-            column_widths = [5, 8, 20, 18, 20, 25, 22]
-            for col, width in enumerate(column_widths, 1):
-                ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = width
-            
-            # Write data and embed QR codes
-            for row_idx, record in enumerate(records, 2):
-                # Write sequential number and data
-                ws.cell(row=row_idx, column=1, value=row_idx - 1)  # Sequential number (#)
-                ws.cell(row=row_idx, column=2, value=record[0])  # ID
-                ws.cell(row=row_idx, column=3, value=record[1])  # Serial Number
-                ws.cell(row=row_idx, column=4, value=record[2])  # Verification Code
-                ws.cell(row=row_idx, column=5, value=record[3])  # DevUID
-                
-                # Format created_at
-                created_at = datetime.fromisoformat(record[5]).strftime("%Y-%m-%d %H:%M:%S")
-                ws.cell(row=row_idx, column=7, value=created_at)  # Created At
+            # Data rows
+            for row, record in enumerate(records, 2):
+                ws.cell(row=row, column=1, value=record[0])  # ID
+                ws.cell(row=row, column=2, value=record[1])  # Serial Number
+                ws.cell(row=row, column=3, value=record[2])  # Verification Code
+                ws.cell(row=row, column=4, value=record[3])  # DevUID
+                ws.cell(row=row, column=5, value=record[4] if record[4] else "")  # Device Name
+                ws.cell(row=row, column=7, value=record[6])  # Created At
                 
                 # Add QR code image if file exists
-                qr_filename = record[4]
+                qr_filename = record[5]
                 if os.path.exists(qr_filename):
                     try:
-                        # Insert image into Excel directly
-                        img_excel = OpenpyxlImage(qr_filename)
-                        
-                        # Resize the image in Excel (width and height in points)
-                        img_excel.width = 120  # approximately 150 pixels
-                        img_excel.height = 120  # approximately 150 pixels
-                        
-                        # Position the image in the QR Code column (column F)
-                        img_excel.anchor = f"F{row_idx}"
-                        ws.add_image(img_excel)
-                        
-                        # Set row height to accommodate image (in points)
-                        ws.row_dimensions[row_idx].height = 90
-                        
-                    except Exception as e:
-                        ws.cell(row=row_idx, column=6, value=f"Error loading: {qr_filename}")
+                        img = OpenpyxlImage(qr_filename)
+                        img.width = 100
+                        img.height = 100
+                        ws.add_image(img, f'F{row}')
+                        ws.row_dimensions[row].height = 75
+                    except:
+                        ws.cell(row=row, column=6, value="[QR file not found]")
                 else:
-                    ws.cell(row=row_idx, column=6, value=f"File not found: {qr_filename}")
+                    ws.cell(row=row, column=6, value="[QR file not found]")
             
-            # Use fixed filename that gets overwritten
-            excel_filename = "qr_records.xlsx"
+            # Adjust column widths
+            ws.column_dimensions['A'].width = 8
+            ws.column_dimensions['B'].width = 20
+            ws.column_dimensions['C'].width = 15
+            ws.column_dimensions['D'].width = 20
+            ws.column_dimensions['E'].width = 15
+            ws.column_dimensions['F'].width = 15
+            ws.column_dimensions['G'].width = 20
             
             # Save workbook
-            wb.save(excel_filename)
-            print(f"📊 Excel file updated: {excel_filename}")
+            wb.save('qr_records.xlsx')
+            print("📊 Excel file updated: qr_records.xlsx")
             
-        except ImportError:
-            pass  # Silent fail if openpyxl not available
         except Exception as e:
-            print(f"Warning: Silent Excel export failed: {e}")
+            raise e
     
-    def view_records(self):
-        """Open a new window to view all records"""
-        records_window = tk.Toplevel(self.root)
-        records_window.title("All Records")
-        records_window.geometry("900x500")
-        
-        # Create treeview for all records
-        columns = ('ID', 'Serial Number', 'Verification Code', 'DevUID', 'QR Filename', 'Created At')
-        records_tree = ttk.Treeview(records_window, columns=columns, show='headings')
-        
-        # Define headings
-        for col in columns:
-            records_tree.heading(col, text=col)
-            records_tree.column(col, width=140)
-        
-        # Scrollbars
-        v_scrollbar = ttk.Scrollbar(records_window, orient=tk.VERTICAL, command=records_tree.yview)
-        h_scrollbar = ttk.Scrollbar(records_window, orient=tk.HORIZONTAL, command=records_tree.xview)
-        records_tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
-        
-        # Pack widgets
-        records_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
-        
-        # Load all records
-        try:
-            self.cursor.execute('''
-                SELECT id, serial_number, verification_code, dev_uid, qr_filename, created_at
-                FROM qr_records
-                ORDER BY created_at DESC
-            ''')
-            all_records = self.cursor.fetchall()
-            
-            for record in all_records:
-                created_at = datetime.fromisoformat(record[5]).strftime("%Y-%m-%d %H:%M:%S")
-                records_tree.insert('', 'end', values=(record[0], record[1], record[2], record[3], record[4], created_at))
-                
-        except Exception as e:
-            messagebox.showerror("Database Error", f"Failed to load all records: {str(e)}")
+    def show_error(self, message):
+        """Show error message"""
+        self.status_text.value = message
+        self.status_text.color = ft.Colors.RED
+        self.page.update()
+        print(f"❌ Error: {message}")
     
-    def __del__(self):
-        """Close database connection"""
-        if hasattr(self, 'conn'):
-            self.conn.close()
+    def show_success(self, message):
+        """Show success message"""
+        self.status_text.value = message
+        self.status_text.color = ft.Colors.GREEN
+        self.page.update()
+        print(f"✅ Success: {message}")
 
-def main():
-    root = tk.Tk()
-    app = QRGeneratorApp(root)
-    root.mainloop()
+def main(page: ft.Page):
+    """Main function to run the Flet app"""
+    try:
+        app = QRGeneratorApp(page)
+    except Exception as e:
+        print(f"Error creating app: {e}")
+        page.add(ft.Text(f"Error: {e}"))
 
 if __name__ == "__main__":
-    main() 
+    ft.app(target=main) 
