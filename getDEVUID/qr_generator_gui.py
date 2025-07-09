@@ -1,7 +1,7 @@
 import flet as ft
 import qrcode
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from PIL import Image
 import os
 import json
@@ -18,6 +18,9 @@ class QRGeneratorApp:
     def __init__(self, page: ft.Page):
         self.page = page
         self.page.title = "QR Code Generator"
+        
+        # Define South African timezone (SAST = GMT+2)
+        self.sast_tz = timezone(timedelta(hours=2))
         
         # Make window resizable and responsive with better minimum sizes
         self.page.window_width = 1200
@@ -57,7 +60,7 @@ class QRGeneratorApp:
                 dev_uid TEXT NOT NULL,
                 device_name TEXT,
                 qr_filename TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT (datetime('now', '+2 hours'))
             )
         ''')
         
@@ -277,7 +280,7 @@ class QRGeneratorApp:
                     expand=True
                 )),
                 ft.DataColumn(ft.Container(
-                    content=ft.Text("Created", weight=ft.FontWeight.BOLD, size=11, text_align=ft.TextAlign.CENTER),
+                    content=ft.Text("Created (SAST)", weight=ft.FontWeight.BOLD, size=11, text_align=ft.TextAlign.CENTER),
                     alignment=ft.alignment.center,
                     expand=True
                 )),
@@ -530,9 +533,9 @@ class QRGeneratorApp:
             # Create QR code image
             qr_image = qr.make_image(fill_color="black", back_color="white")
             
-            # Generate filename with timestamp
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"qr_code_{serial_number}_{timestamp}.png"
+            # Generate filename with timestamp (SAST)
+            timestamp = datetime.now(self.sast_tz).strftime("%Y%m%d_%H%M%S")
+            filename = f"qr_code_{serial_number}_{timestamp}_SAST.png"
             
             # Save QR code image
             qr_image.save(filename)
@@ -583,14 +586,16 @@ class QRGeneratorApp:
             max_id = self.cursor.fetchone()[0]
             next_id = (max_id + 1) if max_id else 1
             
-            # Insert with specific ID
+            # Insert with specific ID and SAST timestamp
+            sast_timestamp = datetime.now(self.sast_tz).isoformat()
             self.cursor.execute('''
-                INSERT INTO qr_records (id, serial_number, verification_code, dev_uid, device_name, qr_filename)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (next_id, serial_number, verification_code, dev_uid, device_name, filename))
+                INSERT INTO qr_records (id, serial_number, verification_code, dev_uid, device_name, qr_filename, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (next_id, serial_number, verification_code, dev_uid, device_name, filename, sast_timestamp))
             self.conn.commit()
             
-            print(f"Record saved with ID: {next_id}" + (f" (Device: {device_name})" if device_name else ""))
+            sast_time = datetime.now(self.sast_tz).strftime("%Y-%m-%d %H:%M:%S SAST")
+            print(f"Record saved with ID: {next_id} at {sast_time}" + (f" (Device: {device_name})" if device_name else ""))
             
         except Exception as e:
             self.show_error(f"Failed to save to database: {str(e)}")
@@ -652,9 +657,12 @@ class QRGeneratorApp:
             # Add records to table
             for record in records:
                 try:
-                    created_at = datetime.fromisoformat(record[4]).strftime("%m-%d %H:%M")
+                    # Parse SAST timestamp and format for display
+                    sast_dt = datetime.fromisoformat(record[4].replace('Z', '+02:00'))
+                    created_at = sast_dt.strftime("%m-%d %H:%M SAST")
                 except:
-                    created_at = str(record[4])[:10]
+                    # Fallback for older records
+                    created_at = str(record[4])[:16] + " SAST"
                     
                 # Display more of the data with less truncation
                 serial_display = record[1][:18] + "..." if len(record[1]) > 18 else record[1]
@@ -864,7 +872,8 @@ class QRGeneratorApp:
         self.status_text.color = ft.Colors.BLUE
         self.page.update()
         
-        print(f"📝 Test data filled:")
+        sast_time = datetime.now(self.sast_tz).strftime("%Y-%m-%d %H:%M:%S SAST")
+        print(f"📝 Test data filled ({sast_time}):")
         print(f"   Serial: {test_serial}")
         print(f"   V-Code: {test_vcode}")
         print(f"   DevUID: {test_devuid}")
@@ -944,7 +953,7 @@ class QRGeneratorApp:
             ws.title = "QR Records"
             
             # Headers
-            headers = ['ID', 'Serial Number', 'Verification Code', 'DevUID', 'Device Name', 'QR Code', 'Created At']
+            headers = ['ID', 'Serial Number', 'Verification Code', 'DevUID', 'Device Name', 'QR Code', 'Created At (SAST)']
             for col, header in enumerate(headers, 1):
                 cell = ws.cell(row=1, column=col, value=header)
                 cell.font = Font(bold=True)
@@ -985,7 +994,8 @@ class QRGeneratorApp:
             
             # Save workbook
             wb.save('qr_records.xlsx')
-            print("📊 Excel file updated: qr_records.xlsx")
+            sast_time = datetime.now(self.sast_tz).strftime("%Y-%m-%d %H:%M:%S SAST")
+            print(f"📊 Excel file updated: qr_records.xlsx at {sast_time}")
             
         except Exception as e:
             raise e

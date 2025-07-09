@@ -3,8 +3,18 @@
 import os
 import sys
 import subprocess
+from datetime import datetime, timezone, timedelta
 
 def main():
+    # Define South African timezone (SAST = GMT+2)
+    sast_tz = timezone(timedelta(hours=2))
+    
+    # Get current SAST time
+    sast_time = datetime.now(sast_tz).strftime("%Y-%m-%d %H:%M:%S SAST")
+    
+    print(f"🚀 QR Generator Launcher ({sast_time})")
+    print("=" * 50)
+    
     # Get the directory where this script is located
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
@@ -18,6 +28,9 @@ def main():
     if not os.path.exists(gui_script):
         print(f"❌ Error: QR Generator GUI not found at {gui_script}")
         sys.exit(1)
+    
+    print(f"📁 Changing to directory: {getdevuid_dir}")
+    print("🎨 Launching QR Generator GUI with SAST timezone...")
     
     # Change to the getDEVUID directory and run the GUI
     try:
